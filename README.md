@@ -25,8 +25,14 @@
 
 ## Aplicación y Guía de usuario
 
-[![Descargar APK](https://img.shields.io/badge/Descargar-APK-brightgreen?style=for-the-badge&logo=android)](https://github.com/luzardothomas/JPUV/releases/download/v1.0.0/jpuv_v1.0.0.apk)
-[![Descargar PDF](https://img.shields.io/badge/Descargar-PDF-red?style=for-the-badge&logo=adobeacrobatreader&logoColor=white)](https://github.com/luzardothomas/JPUV/releases/download/v1.0.0/jpuv_guia_de_usuario_v1.0.0.pdf)
+<p align="center">
+  <a href="https://github.com/luzardothomas/JPUV/releases/download/v1.0.0/jpuv_v1.0.0.apk">
+    <img src="https://img.shields.io/badge/Descargar-APK-brightgreen?style=for-the-badge&logo=android" alt="Descargar APK">
+  </a>
+  <a href="https://github.com/luzardothomas/JPUV/releases/download/v1.0.0/jpuv_guia_de_usuario_v1.0.0.pdf">
+    <img src="https://img.shields.io/badge/Descargar-PDF-red?style=for-the-badge&logo=adobeacrobatreader&logoColor=white" alt="Descargar PDF">
+  </a>
+</p>
 
 ## Tecnologías utilizadas
 
