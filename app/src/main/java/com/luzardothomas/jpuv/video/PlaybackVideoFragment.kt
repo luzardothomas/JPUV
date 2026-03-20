@@ -1,0 +1,1096 @@
+package com.luzardothomas.jpuv.video
+
+import android.app.AlertDialog
+import android.content.Context
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.view.KeyEvent
+import android.view.LayoutInflater
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.SeekBar
+import android.widget.TextView
+import android.widget.Toast
+import androidx.fragment.app.Fragment
+import com.luzardothomas.jpuv.utils.JsonDataManager
+import com.luzardothomas.jpuv.utils.Movie
+import com.luzardothomas.jpuv.R
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.Media
+import org.videolan.libvlc.MediaPlayer.TrackDescription
+import org.videolan.libvlc.util.VLCVideoLayout
+import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import com.luzardothomas.jpuv.utils.LanguageResolver
+
+/**
+ * Fragmento principal que sirve para reproducir videos
+ */
+
+class PlaybackVideoFragment : Fragment() {
+
+    companion object {
+        private const val PREFS_NAME = "jpuv_prefs"
+        private const val PREF_LAST_URL = "LAST_PLAYED_VIDEO_URL"
+    }
+
+    private val PREF_GLOBAL_AUDIO = "GLOBAL_AUDIO_PREF"
+    private val PREF_GLOBAL_SUBS  = "GLOBAL_SUBS_PREF"
+
+    private val TAG = "PlaybackVideoFragment"
+    private val END_EPSILON_MS = 1500L
+
+    private lateinit var root: View
+    private lateinit var videoLayout: VLCVideoLayout
+
+    private lateinit var controlsOverlay: View
+    private lateinit var seekBar: SeekBar
+    private lateinit var btnSeekBack: ImageButton
+    private lateinit var btnPlayPause: ImageButton
+    private lateinit var btnSeekFwd: ImageButton
+    private lateinit var btnSubtitles: ImageButton
+    private lateinit var skipIntroButton: Button
+
+    private var lastSkipVisible = false
+    private var introSkipDoneForCurrent = false
+    private var skipHideUntilMs: Long = 0L
+
+    private lateinit var txtPos: TextView
+    private lateinit var txtDur: TextView
+
+    private lateinit var btnPrevVideo: ImageButton
+    private lateinit var btnNextVideo: ImageButton
+
+    private var playlist: List<Movie> = emptyList()
+    private var currentIndex: Int = 0
+    private var currentMovie: Movie? = null
+
+    private var loopPlaylist: Boolean = false
+    private var disableLastPlayed: Boolean = false
+
+    private var btnExitMobile: View? = null
+
+    // UI Helpers
+    private val ui = Handler(Looper.getMainLooper())
+    private var ticker: Runnable? = null
+
+    // Control de reintentos silenciosos
+    private var errorRetryTimestamp: Long = 0
+    private val MIN_RETRY_INTERVAL_MS = 2000L
+
+    private var isUserSeeking = false
+    private var lastSeekTime = 0L
+    private val SEEK_THROTTLE_MS = 250L
+    private var controlsVisible = true
+
+    private val SEEK_STEP_MS = 10_000L
+    private val AUTO_HIDE_MS = 10000L
+    private val SKIP_WINDOW_MS = 15_000L
+
+    private var previewSeekMs: Long? = null
+
+    private var endHandled = false
+
+    private val clearPreviewRunnable = Runnable {
+        isUserSeeking = false
+        previewSeekMs = null
+    }
+
+    // Tracks
+    private var tracksAppliedForThisMovie = false
+    private var spuTracks: Array<TrackDescription> = emptyArray()
+    private var audioTracks: Array<TrackDescription> = emptyArray()
+    private var currentAudioTrackId: Int = -1
+    private var currentSpuTrackId: Int = -1
+    private var tracksRefreshTries = 0
+    private val MAX_TRACKS_REFRESH_TRIES = 18
+    private val TRACKS_REFRESH_DELAY_MS = 650L
+
+    // ==========================================
+    //  DETECTAR DISPOSITIVO
+    // ==========================================
+    private fun isTvDevice(): Boolean {
+        if (!isAdded || context == null) return false
+
+        val cfg = resources.configuration
+        val pm = requireContext().packageManager
+
+        val uiModeType = cfg.uiMode and Configuration.UI_MODE_TYPE_MASK
+        val isTelevision = uiModeType == Configuration.UI_MODE_TYPE_TELEVISION
+
+        val hasLeanback = pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
+                pm.hasSystemFeature("android.software.leanback")
+
+        val hasTelevisionFeature = pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+
+        val noTouch = cfg.touchscreen == Configuration.TOUCHSCREEN_NOTOUCH
+        val dpad = cfg.navigation == Configuration.NAVIGATION_DPAD
+
+        return isTelevision || hasLeanback || hasTelevisionFeature || (noTouch && dpad)
+    }
+
+
+    // =========================
+    // Helpers (Tracks, Prefs)
+    // =========================
+    private fun groupScopeKey(): String {
+        val group = currentMovie?.studio?.trim().orEmpty()
+        return if (group.isNotBlank()) "GROUP::$group" else "GROUP::(none)"
+    }
+
+    private fun langToken(scopeKey: String): String {
+        val ctx = context ?: return "0"
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString("LANGCFG_TOKEN::$scopeKey", "0") ?: "0"
+    }
+
+
+    private fun trackPrefsKey(url: String): String {
+        val token = langToken(groupScopeKey())
+        return "TRACKS::v=$token::" + url.trim()
+    }
+
+    private val trackCache = HashMap<String, Pair<Int, Int>>()
+
+    private fun saveTracks(url: String, audioId: Int, spuId: Int) {
+        val ctx = context ?: return
+        val k = trackPrefsKey(url)
+        trackCache[k] = Pair(audioId, spuId)
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putInt("$k::audio", audioId).putInt("$k::spu", spuId).apply()
+    }
+
+    private val tracksRefreshRunnable = object : Runnable {
+        override fun run() {
+            if (!isAdded || context == null) return
+
+            refreshTracks()
+            val hasRealSubs = spuTracks.any { it.id != -1 }
+            val hasRealAudio = audioTracks.any { it.id != -1 }
+
+            if (!tracksAppliedForThisMovie && (hasRealSubs || hasRealAudio)) {
+                tracksAppliedForThisMovie = true
+                applySavedOrDefaultTracksForCurrentMovie()
+                persistCurrentTracks()
+            }
+
+            tracksRefreshTries++
+            if ((hasRealSubs || hasRealAudio) || tracksRefreshTries >= MAX_TRACKS_REFRESH_TRIES) return
+            ui.postDelayed(this, TRACKS_REFRESH_DELAY_MS)
+        }
+    }
+
+    private fun scheduleTracksRefreshLoop() {
+        ui.removeCallbacks(tracksRefreshRunnable)
+        tracksRefreshTries = 0
+        ui.post(tracksRefreshRunnable)
+    }
+
+    private fun refreshTracks() {
+        if (!isAdded) return
+
+        val p = VideoPlayerHolder.mediaPlayer ?: run {
+            spuTracks = emptyArray(); audioTracks = emptyArray()
+            btnSubtitles.isEnabled = false; btnSubtitles.alpha = 0.35f
+            return
+        }
+        spuTracks = try { p.spuTracks ?: emptyArray() } catch (_: Exception) { emptyArray() }
+        audioTracks = try { p.audioTracks ?: emptyArray() } catch (_: Exception) { emptyArray() }
+        val hasAny = (audioTracks.count { it.id != -1 } > 0) || spuTracks.isNotEmpty()
+        btnSubtitles.isEnabled = hasAny
+        btnSubtitles.alpha = if (hasAny) 1f else 0.35f
+
+        // Llamada segura a isTvDevice
+        if (isTvDevice()) {
+            btnSubtitles.isFocusable = hasAny
+            btnSubtitles.isFocusableInTouchMode = hasAny
+        }
+    }
+
+    private fun setSubtitleTrack(trackId: Int) {
+        val p = VideoPlayerHolder.mediaPlayer ?: return
+        currentSpuTrackId = trackId
+        try { p.spuTrack = trackId } catch (_: Exception) {}
+    }
+
+    private fun setAudioTrack(trackId: Int) {
+        val p = VideoPlayerHolder.mediaPlayer ?: return
+        currentAudioTrackId = trackId
+        try { p.audioTrack = trackId } catch (_: Exception) {}
+    }
+
+    private fun saveGlobalPref(kind: String, value: String) {
+        val ctx = context ?: return
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString(if (kind == "audio") PREF_GLOBAL_AUDIO else PREF_GLOBAL_SUBS, value).apply()
+    }
+
+    private fun loadGlobalPref(kind: String): String? {
+        val ctx = context ?: return null
+        val p = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return p.getString(if (kind == "audio") PREF_GLOBAL_AUDIO else PREF_GLOBAL_SUBS, null)
+    }
+
+    private fun applySavedOrDefaultTracksForCurrentMovie() {
+        val player = VideoPlayerHolder.mediaPlayer ?: return
+        refreshTracks()
+
+        val savedAudio = loadGlobalPref("audio")
+        val savedSubs = loadGlobalPref("subs")
+
+        val audioMatch = LanguageResolver.findBestMatch(audioTracks, savedAudio)
+
+        if (audioMatch != null) {
+            //  Encontramos el audio deseado (Ej: Español)
+            player.audioTrack = audioMatch
+            currentAudioTrackId = audioMatch
+
+            // Como tenemos el audio correcto, respetamos la decisión del usuario sobre los subs
+            if (savedSubs == "disable") {
+                player.spuTrack = -1
+                currentSpuTrackId = -1
+            } else {
+                val subMatch = LanguageResolver.findBestMatch(spuTracks, savedSubs)
+                if (subMatch != null) {
+                    player.spuTrack = subMatch
+                    currentSpuTrackId = subMatch
+                } else {
+                    player.spuTrack = -1
+                    currentSpuTrackId = -1
+                }
+            }
+        } else {
+            //  NO encontramos el audio (Ej: Quería Español, pero solo hay Inglés)
+            // El reproductor pondrá su audio por defecto, pero nosotros forzamos los subtítulos
+            // buscando el idioma que originalmente quería escuchar (savedAudio)
+            val fallbackSubMatch = LanguageResolver.findBestMatch(spuTracks, savedAudio)
+
+            if (fallbackSubMatch != null) {
+                player.spuTrack = fallbackSubMatch
+                currentSpuTrackId = fallbackSubMatch
+            } else {
+                // Si por mala suerte tampoco hay subtítulos en ese idioma,
+                // intentamos poner lo que haya guardado en savedSubs (si no está deshabilitado)
+                if (savedSubs != "disable") {
+                    val subMatch = LanguageResolver.findBestMatch(spuTracks, savedSubs)
+                    player.spuTrack = subMatch ?: -1
+                    currentSpuTrackId = subMatch ?: -1
+                } else {
+                    player.spuTrack = -1
+                    currentSpuTrackId = -1
+                }
+            }
+        }
+    }
+
+    private fun persistLastPlayed(reason: String = "") {
+        if (disableLastPlayed) return
+        val url = currentMovie?.videoUrl?.trim().orEmpty()
+        if (url.isEmpty()) return
+        val ctx = context ?: return
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString(PREF_LAST_URL, url).apply()
+        Log.e(TAG, "PERSIST lastUrl=$url reason=$reason")
+    }
+
+    private fun persistCurrentTracks() {
+        val url = currentMovie?.videoUrl?.trim().orEmpty()
+        val p = VideoPlayerHolder.mediaPlayer ?: return
+        if (url.isBlank()) return
+        val a = try { p.audioTrack } catch (_: Exception) { currentAudioTrackId }
+        val s = try { p.spuTrack } catch (_: Exception) { currentSpuTrackId }
+        saveTracks(url, a, s)
+    }
+
+    private fun setupSubtitles() {
+        btnSubtitles.isEnabled = false; btnSubtitles.alpha = 0.35f
+        btnSubtitles.setOnClickListener { bumpControlsTimeout(); showExitTemporarily(); openTracksDialog() }
+    }
+
+    private fun refreshSpuTracks() {
+        val p = VideoPlayerHolder.mediaPlayer ?: return
+        spuTracks = try { p.spuTracks ?: emptyArray() } catch (_: Exception) { emptyArray() }
+        val has = spuTracks.isNotEmpty()
+        btnSubtitles.isEnabled = has
+        btnSubtitles.alpha = if (has) 1f else 0.35f
+    }
+
+    private fun openTracksDialog() {
+        val player = VideoPlayerHolder.mediaPlayer ?: return
+
+        val audioList = LanguageResolver.getValidTracks(player, isAudio = true)
+        val subsList = LanguageResolver.getValidTracks(player, isAudio = false)
+
+        if (audioList.isEmpty() && subsList.size <= 1) return
+
+        // Contenedor principal con Scroll
+        val scrollView = android.widget.ScrollView(requireContext())
+        val container = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 30, 40, 10)
+        }
+
+        // --- SECCIÓN AUDIO ---
+        if (audioList.isNotEmpty()) {
+            container.addView(TextView(requireContext()).apply {
+                text = "Audio"; textSize = 18f; setTypeface(null, android.graphics.Typeface.BOLD)
+                setPadding(0, 10, 0, 10)
+            })
+
+            // Instanciamos un ListView personalizado "al vuelo" para calcular su altura exacta
+            val lvAudio = object : ListView(requireContext()) {
+                override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                    // Forzamos a que mida todos sus elementos sin hacer scroll interno
+                    val expandSpec = MeasureSpec.makeMeasureSpec(Int.MAX_VALUE shr 2, MeasureSpec.AT_MOST)
+                    super.onMeasure(widthMeasureSpec, expandSpec)
+                }
+            }.apply {
+                choiceMode = ListView.CHOICE_MODE_SINGLE
+            }
+
+            val audioNames = audioList.mapIndexed { i, t -> LanguageResolver.getDisplayName(t, "Audio", i) }.toTypedArray()
+            lvAudio.adapter = android.widget.ArrayAdapter(requireContext(), android.R.layout.simple_list_item_single_choice, audioNames)
+
+            val currentId = player.audioTrack
+            lvAudio.setItemChecked(audioList.indexOfFirst { it.id == currentId }.coerceAtLeast(0), true)
+            lvAudio.setOnItemClickListener { _, _, which, _ ->
+                val t = audioList[which]
+                setAudioTrack(t.id)
+                val root = LanguageResolver.simplify(t.name)
+                saveGlobalPref("audio", root)
+            }
+            container.addView(lvAudio)
+        }
+
+        // --- SECCIÓN SUBTÍTULOS ---
+        if (subsList.isNotEmpty()) {
+            container.addView(TextView(requireContext()).apply {
+                text = "Subtítulos"; textSize = 18f; setTypeface(null, android.graphics.Typeface.BOLD)
+                setPadding(0, 30, 0, 10)
+            })
+
+            // Hacemos exactamente lo mismo para los subtítulos
+            val lvSubs = object : ListView(requireContext()) {
+                override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                    val expandSpec = MeasureSpec.makeMeasureSpec(Int.MAX_VALUE shr 2, MeasureSpec.AT_MOST)
+                    super.onMeasure(widthMeasureSpec, expandSpec)
+                }
+            }.apply {
+                choiceMode = ListView.CHOICE_MODE_SINGLE
+            }
+
+            val subsNames = subsList.mapIndexed { i, t -> LanguageResolver.getDisplayName(t, "Subtítulos", i) }.toTypedArray()
+            lvSubs.adapter = android.widget.ArrayAdapter(requireContext(), android.R.layout.simple_list_item_single_choice, subsNames)
+
+            val currentSId = player.spuTrack
+            lvSubs.setItemChecked(subsList.indexOfFirst { it.id == currentSId }.coerceAtLeast(0), true)
+            lvSubs.setOnItemClickListener { _, _, which, _ ->
+                val t = subsList[which]
+                setSubtitleTrack(t.id)
+                val root = if (t.id == -1) "disable" else LanguageResolver.simplify(t.name)
+                saveGlobalPref("subs", root)
+            }
+            container.addView(lvSubs)
+        }
+
+        scrollView.addView(container)
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("Seleccionar Pistas")
+            .setView(scrollView)
+            .setPositiveButton("Cerrar", null)
+            .show()
+    }
+
+    private val hideExitRunnable = Runnable { btnExitMobile?.animate()?.alpha(0f)?.setDuration(150)?.start() }
+
+    private fun showExitTemporarily(timeoutMs: Long = AUTO_HIDE_MS) {
+        if (isTvDevice()) return // En TV no mostramos el exit flotante
+        val b = btnExitMobile ?: return
+        ui.removeCallbacks(hideExitRunnable)
+        if (b.visibility != View.VISIBLE) b.visibility = View.VISIBLE
+        b.animate().alpha(1f).setDuration(120).start()
+        ui.postDelayed(hideExitRunnable, timeoutMs)
+    }
+
+    private fun enterImmersiveMode() {
+        val window = requireActivity().window
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        controller.apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            // Esto hace el trabajo del listener: si aparecen, se van solas
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+
+        if (VideoPlayerHolder.mediaPlayer != null) {
+            Log.d("DEBUG_VLC", "Fragment onStart: Llamando a reconnect...")
+            VideoPlayerHolder.reconnect(videoLayout)
+        }
+
+        // Forzamos el modo inmersivo al iniciar
+        enterImmersiveMode()
+    }
+
+    private val hideControlsRunnable = Runnable {
+        controlsVisible = false
+        controlsOverlay.alpha = 0f
+        controlsOverlay.visibility = View.GONE
+        if (isTvDevice() && skipIntroButton.visibility == View.VISIBLE) skipIntroButton.requestFocus()
+        else root.requestFocus()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        Log.d("DEBUG_VLC", " Fragment: onResume")
+        val player = VideoPlayerHolder.mediaPlayer
+        if (player != null) {
+            val attached = player.vlcVout.areViewsAttached()
+            Log.d("DEBUG_VLC", " Fragment: onResume check -> ¿Vistas acopladas? $attached")
+        }
+        if (!controlsVisible) root.requestFocus()
+        enterImmersiveMode()
+    }
+
+    // ==========================================
+    //  ON CREATE VIEW - INIT GENERAL
+    // ==========================================
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        root = inflater.inflate(R.layout.fragment_playback_video, container, false)
+        videoLayout = root.findViewById(R.id.player_view)
+        controlsOverlay = root.findViewById(R.id.controls_overlay)
+        seekBar = root.findViewById(R.id.seek_bar)
+        btnSeekBack = root.findViewById(R.id.btn_seek_back)
+        btnPlayPause = root.findViewById(R.id.btn_play_pause)
+        btnSeekFwd = root.findViewById(R.id.btn_seek_fwd)
+        btnSubtitles = root.findViewById(R.id.btn_subtitles)
+        skipIntroButton = root.findViewById(R.id.skip_intro_button)
+        txtPos = root.findViewById(R.id.txt_pos)
+        txtDur = root.findViewById(R.id.txt_dur)
+        btnExitMobile = root.findViewById(R.id.btn_exit_mobile)
+        btnPrevVideo = root.findViewById(R.id.btn_prev_video)
+        btnNextVideo = root.findViewById(R.id.btn_next_video)
+
+        // Estilos base transparentes para todos
+        btnPrevVideo.setImageResource(android.R.drawable.ic_media_previous)
+        btnNextVideo.setImageResource(android.R.drawable.ic_media_next)
+        btnPrevVideo.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        btnNextVideo.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        btnSeekBack.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        btnPlayPause.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        btnSeekFwd.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        btnSubtitles.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+
+        setupSharedControls() // Funcionalidad común (Clicks simples)
+        setupSubtitles()      // Común
+
+        // ==========================================
+        //  DIVISIÓN DE LÓGICA TV / MOBILE
+        // ==========================================
+        if (isTvDevice()) {
+            setupTvUi()
+        } else {
+            setupMobileUi()
+        }
+
+        scheduleAutoHide()
+        return root
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        root = view
+        resolvePlaylistAndIndex()
+        tracksAppliedForThisMovie = false
+        introSkipDoneForCurrent = false
+        lastSkipVisible = false
+
+        val url = currentMovie?.videoUrl
+        if (url.isNullOrBlank()) {
+            requireActivity().finish()
+            return
+        }
+
+        loopPlaylist = requireActivity().intent?.getBooleanExtra("EXTRA_LOOP_PLAYLIST", false) == true
+        disableLastPlayed = requireActivity().intent?.getBooleanExtra("EXTRA_DISABLE_LAST_PLAYED", false) == true
+
+        persistLastPlayed("enter")
+        endHandled = false
+        updatePrevNextState()
+
+        initVlc(url)
+        startTicker()
+        view.keepScreenOn = true
+    }
+
+    private fun resolvePlaylistAndIndex() {
+        // Obtener la película (Esto ya debería estar libre de warnings)
+        val argMovie = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arguments?.getSerializable("movie", Movie::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            arguments?.getSerializable("movie") as? Movie
+        } ?: run {
+            playlist = emptyList(); currentIndex = 0; currentMovie = null; return
+        }
+
+        // Obtener la lista (Aquí manejamos los Unchecked Cast)
+        @Suppress("UNCHECKED_CAST")
+        val argList = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arguments?.getSerializable("playlist", ArrayList::class.java) as? ArrayList<Movie>
+        } else {
+            @Suppress("DEPRECATION")
+            arguments?.getSerializable("playlist") as? ArrayList<Movie>
+        }
+
+        val argName = arguments?.getString("playlist_name")
+        val argIndex = arguments?.getInt("index", 0) ?: 0
+
+        playlist = if (!argName.isNullOrEmpty()) {
+            val jsonManager = JsonDataManager().apply { loadData(requireContext()) }
+            val videos = jsonManager.getImportedJsons().firstOrNull { it.fileName == argName }?.videos
+
+            videos?.map { Movie().apply { videoUrl = it.videoUrl; delaySkip = it.delaySkip; skipToSecond = it.skip } } ?: listOf(argMovie)
+        } else {
+            if (!argList.isNullOrEmpty()) argList else listOf(argMovie)
+        }
+
+        currentIndex = argIndex.coerceIn(0, playlist.lastIndex)
+        currentMovie = playlist[currentIndex]
+    }
+
+    // Configuración compartida (Listeners básicos de click funcionan en ambos)
+    private fun setupSharedControls() {
+        seekBar.max = 1000
+        seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onStartTrackingTouch(seekBar: SeekBar) {
+                isUserSeeking = true; ui.removeCallbacks(hideControlsRunnable); showExitTemporarily()
+            }
+            override fun onStopTrackingTouch(seekBar: SeekBar) {
+                val p = VideoPlayerHolder.mediaPlayer ?: run { isUserSeeking = false; return }
+                val dur = p.length
+                if (dur <= 0) { isUserSeeking = false; return }
+
+                val target = (dur * (seekBar.progress / 1000.0)).toLong()
+                if (target >= dur - END_EPSILON_MS) {
+                    seekBar.progress = 1000
+                    txtPos.text = formatMs(dur)
+                    previewSeekMs = null
+                    isUserSeeking = false
+                    p.time = dur
+                    handleVideoEnded()
+                    return
+                }
+                p.time = target
+                isUserSeeking = false
+                scheduleAutoHide()
+                showExitTemporarily()
+            }
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {}
+        })
+
+        btnPlayPause.setOnClickListener { togglePlayPause(); bumpControlsTimeout(); showExitTemporarily() }
+        btnSeekBack.setOnClickListener { seekByMs(-SEEK_STEP_MS); bumpControlsTimeout(); showExitTemporarily() }
+        btnSeekFwd.setOnClickListener { seekByMs(SEEK_STEP_MS); bumpControlsTimeout(); showExitTemporarily() }
+        skipIntroButton.setOnClickListener { performSkipIntro(); hideOverlayOnly(); showExitTemporarily() }
+        btnPrevVideo.setOnClickListener { prevIndex()?.let { playIndex(it); bumpControlsTimeout(); showExitTemporarily() } }
+        btnNextVideo.setOnClickListener { nextIndex()?.let { playIndex(it); bumpControlsTimeout(); showExitTemporarily() } }
+    }
+
+    // =========================================================
+    //  CONFIGURACIÓN DE UI PARA TV
+    // =========================================================
+
+    private fun setupTvUi() {
+        Log.d(TAG, "Inicializando UI modo TV")
+
+        // Ocultar controles Mobile
+        btnExitMobile?.visibility = View.GONE
+
+        // Habilitar foco para navegación D-Pad
+        root.isFocusable = true
+        root.isFocusableInTouchMode = true
+        root.requestFocus()
+
+        videoLayout.isFocusable = true
+        videoLayout.isFocusableInTouchMode = true
+
+        // Botones focusables
+        val controls = listOf(btnPrevVideo, btnSeekBack, btnPlayPause, btnSeekFwd, btnSubtitles, btnNextVideo, seekBar, skipIntroButton)
+        controls.forEach {
+            it.isFocusable = true
+            it.isFocusableInTouchMode = true
+        }
+
+        // Escalar botones al recibir foco (Visual Feedback)
+        addTvFocusScale(btnPrevVideo)
+        addTvFocusScale(btnSeekBack)
+        addTvFocusScale(btnPlayPause, 1.18f)
+        addTvFocusScale(btnSeekFwd)
+        addTvFocusScale(btnSubtitles)
+        addTvFocusScale(btnNextVideo)
+        addTvFocusScale(seekBar, 1.06f)
+        addTvFocusScale(skipIntroButton, 1.10f)
+
+        // Configurar manejo de eventos de teclado (Control Remoto)
+        setupTvInputHandling()
+
+        //  Listener en videoLayout para mostrar controles con click del centro
+        videoLayout.setOnClickListener {
+            toggleControls()
+            if (controlsVisible) {
+                if (skipIntroButton.visibility == View.VISIBLE) skipIntroButton.requestFocus()
+                else btnPlayPause.requestFocus()
+            }
+        }
+
+        // Foco inicial
+        if (controlsVisible) btnPlayPause.requestFocus()
+    }
+
+    private fun addTvFocusScale(view: View, scale: Float = 1.12f) {
+        view.setOnFocusChangeListener { v, hasFocus ->
+            if (v === seekBar && hasFocus) ui.removeCallbacks(hideControlsRunnable)
+            // Pequeña animación para indicar selección
+            v.animate().scaleX(if(hasFocus) scale else 1f).scaleY(if(hasFocus) scale else 1f).setDuration(120).start()
+        }
+    }
+
+    private fun setupTvInputHandling() {
+        val keyListener = View.OnKeyListener { _, keyCode, event ->
+            if (event.action != KeyEvent.ACTION_DOWN) return@OnKeyListener false
+            if (controlsVisible) bumpControlsTimeout()
+
+            // Atajos directos de media keys
+            when (keyCode) {
+                KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                    nextIndex()?.let { playIndex(it); bumpControlsTimeout() }
+                    return@OnKeyListener true
+                }
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS, KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                    prevIndex()?.let { playIndex(it); bumpControlsTimeout() }
+                    return@OnKeyListener true
+                }
+            }
+
+            val focused = root.findFocus()
+
+            // Lógica específica si el foco está en la barra de progreso
+            if (focused === seekBar) {
+                return@OnKeyListener when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { seekBarStep(-1); true }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBarStep(+1); true }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> true
+                    KeyEvent.KEYCODE_DPAD_DOWN -> { hideOverlayOnly(); true }
+                    else -> false
+                }
+            }
+
+            // Si los controles están ocultos, cualquier toque D-PAD debe mostrarlos o actuar
+            if (!controlsVisible) {
+                return@OnKeyListener when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        // Si hay botón de omitir intro visible, lo accionamos
+                        if (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_DPAD_CENTER) {
+                            if (skipIntroButton.visibility == View.VISIBLE) {
+                                performSkipIntro(); hideOverlayOnly(); return@OnKeyListener true
+                            }
+                        }
+                        // Si no, mostramos la interfaz
+                        showOverlayAndFocusPlay()
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { seekByMs(-SEEK_STEP_MS); true }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> { seekByMs(SEEK_STEP_MS); true }
+                    else -> false
+                }
+            }
+
+            // Comportamiento general con controles visibles
+            when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_DOWN -> { hideOverlayOnly(); true }
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                    val f = root.findFocus()
+                    if (f != null && f.isClickable) { f.performClick(); true }
+                    else { togglePlayPause(); true }
+                }
+                KeyEvent.KEYCODE_BACK -> {
+                    persistLastPlayed()
+                    false // Dejar que el sistema maneje el back
+                }
+                else -> false
+            }
+        }
+
+        // Asignar el listener a todo lo relevante
+        root.setOnKeyListener(keyListener)
+        videoLayout.setOnKeyListener(keyListener)
+        skipIntroButton.setOnKeyListener(keyListener)
+        seekBar.setOnKeyListener(keyListener) // Sobreescribe listener simple
+    }
+
+
+    // =========================================================
+    //  CONFIGURACIÓN DE UI PARA MOBILE
+    // =========================================================
+
+    private fun setupMobileUi() {
+        Log.d(TAG, "Inicializando UI modo Mobile")
+
+        //  Limpiar Listeners de teclado (Mobile no usa KeyEvents complejos)
+        root.setOnKeyListener(null)
+        videoLayout.setOnKeyListener(null)
+        skipIntroButton.setOnKeyListener(null)
+        seekBar.setOnKeyListener(null)
+
+        //  Quitar foco para evitar bordes naranjas o comportamiento extraño
+        val views = listOf(root, videoLayout, seekBar, skipIntroButton, btnPrevVideo, btnSeekBack, btnPlayPause, btnSeekFwd, btnNextVideo, btnSubtitles)
+        views.forEach {
+            it.isFocusable = false
+            it.isFocusableInTouchMode = false
+        }
+
+        //  Configurar botón de salida (exclusivo mobile)
+        btnExitMobile?.let { btn ->
+            btn.visibility = View.VISIBLE
+            btn.alpha = 0f
+            btn.isFocusable = false
+            btn.setOnClickListener {
+                persistLastPlayed()
+                requireActivity().onBackPressedDispatcher.onBackPressed()
+            }
+        }
+
+        //  Mostrar controles y botón de salida al tocar pantalla
+        videoLayout.setOnClickListener {
+            toggleControls()
+            showExitTemporarily()
+        }
+
+        root.setOnTouchListener { _, ev ->
+            if (ev.actionMasked in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE)) {
+                showExitTemporarily()
+            }
+            false
+        }
+
+        // Iniciar mostrando botón de salida
+        ui.post { showExitTemporarily() }
+
+        // Asegurar overlay al frente
+        controlsOverlay.bringToFront()
+        controlsOverlay.translationZ = 50f
+    }
+
+    // =========================================================
+    //  LÓGICA GENERAL (Playlist, VLC, UI Updates)
+    // =========================================================
+
+    private fun updatePrevNextState() {
+        val hasPrev = hasPrev(); val hasNext = hasNext()
+        btnPrevVideo.isEnabled = hasPrev; btnNextVideo.isEnabled = hasNext
+        btnPrevVideo.alpha = if (hasPrev) 1f else 0.35f
+        btnNextVideo.alpha = if (hasNext) 1f else 0.35f
+        if (isTvDevice()) {
+            btnPrevVideo.isFocusable = hasPrev
+            btnNextVideo.isFocusable = hasNext
+        }
+    }
+
+    private fun nextIndex() = if (playlist.size <= 1) null else if (currentIndex < playlist.lastIndex) currentIndex + 1 else if (loopPlaylist) 0 else null
+    private fun prevIndex() = if (playlist.size <= 1) null else if (currentIndex > 0) currentIndex - 1 else if (loopPlaylist) playlist.lastIndex else null
+    private fun hasNext() = nextIndex() != null
+    private fun hasPrev() = prevIndex() != null
+
+    private fun handleVideoEnded() {
+        if (endHandled) return
+        endHandled = true
+        nextIndex()?.let { endHandled = false; playIndex(it) } ?: requireActivity().finish()
+    }
+
+    private fun playIndex(newIndex: Int) {
+        persistCurrentTracks()
+        if (playlist.size <= 1) return
+        val idx = if (loopPlaylist) ((newIndex % playlist.size) + playlist.size) % playlist.size else newIndex.coerceIn(0, playlist.lastIndex)
+        if (idx == currentIndex) return
+
+        val newMovie = playlist[idx]
+        val url = newMovie.videoUrl
+        if (url.isNullOrBlank()) return
+
+        previewSeekMs = null
+        isUserSeeking = false
+        seekBar.progress = 0
+        txtPos.text = "0:00"; txtDur.text = "0:00"
+
+        VideoPlayerHolder.release()
+
+        currentIndex = idx
+        currentMovie = newMovie
+        tracksAppliedForThisMovie = false
+        introSkipDoneForCurrent = false
+        lastSkipVisible = false
+        updatePrevNextState()
+
+        currentSpuTrackId = -1
+        spuTracks = emptyArray()
+        btnSubtitles.isEnabled = false; btnSubtitles.alpha = 0.35f
+
+        persistLastPlayed("playIndex")
+        endHandled = false
+        initVlc(url)
+        btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+        if (isTvDevice()) btnPlayPause.requestFocus()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        persistCurrentTracks()
+        persistLastPlayed("OnPause")
+        VideoPlayerHolder.pause()
+        btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        persistCurrentTracks()
+        persistLastPlayed()
+
+        ui.removeCallbacks(hideExitRunnable)
+        if (!isTvDevice()) root.setOnTouchListener(null)
+        stopTicker()
+        ui.removeCallbacks(hideControlsRunnable)
+        ui.removeCallbacks(clearPreviewRunnable)
+        ui.removeCallbacks(tracksRefreshRunnable)
+
+        VideoPlayerHolder.detach()
+        view?.keepScreenOn = false
+    }
+
+    private fun initVlc(videoUrl: String) {
+        val fixedUrl = when {
+            videoUrl.startsWith("http") || videoUrl.startsWith("file") -> videoUrl
+            videoUrl.startsWith("/") -> "file://$videoUrl"
+            else -> videoUrl
+        }
+        Log.d(TAG, "VLC url=$fixedUrl")
+
+        if (VideoPlayerHolder.mediaPlayer != null && VideoPlayerHolder.currentUrl == fixedUrl) {
+            Log.d("DEBUG_VLC", "Fragment: Player existe. La reconexión se manejará en onStart.")
+            val isPlaying = VideoPlayerHolder.mediaPlayer?.isPlaying == true
+            btnPlayPause.setImageResource(
+                if (isPlaying) android.R.drawable.ic_media_pause
+                else android.R.drawable.ic_media_play
+            )
+            setupVlcListeners(VideoPlayerHolder.mediaPlayer!!)
+            return
+        }
+
+        VideoPlayerHolder.release()
+        VideoPlayerHolder.currentUrl = fixedUrl
+
+        val libVlc = LibVLC(requireContext(), arrayListOf(
+            "-vvv",
+            "--network-caching=600",
+            "--live-caching=600",
+            "--file-caching=600",
+            "--clock-jitter=0",
+            "--clock-synchro=0",
+            "--no-audio-time-stretch",
+            "--codec=mediacodec_ndk,all",
+            "--avcodec-hw=any",
+            "--deinterlace=0",
+        ))
+        VideoPlayerHolder.libVlc = libVlc
+
+        val mp = VlcMediaPlayer(libVlc)
+        VideoPlayerHolder.mediaPlayer = mp
+        mp.volume = 100
+        mp.attachViews(videoLayout, null, false, false)
+        setupVlcListeners(mp)
+        val media = Media(libVlc, Uri.parse(fixedUrl)).apply {
+            setHWDecoderEnabled(true, false)
+            addOption(":http-reconnect=true")
+            addOption(":http-user-agent=JPUV")
+        }
+
+        mp.media = media
+        media.release()
+        mp.play()
+        btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+    }
+
+    private fun setupVlcListeners(mp: VlcMediaPlayer) {
+        mp.setEventListener { ev ->
+            when (ev.type) {
+                VlcMediaPlayer.Event.Playing -> ui.post {
+                    btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+                    scheduleTracksRefreshLoop(); scheduleAutoHide()
+                }
+                VlcMediaPlayer.Event.ESAdded, VlcMediaPlayer.Event.ESDeleted, VlcMediaPlayer.Event.ESSelected -> ui.post { refreshSpuTracks() }
+                VlcMediaPlayer.Event.Paused -> ui.post { btnPlayPause.setImageResource(android.R.drawable.ic_media_play) }
+                VlcMediaPlayer.Event.EndReached -> ui.post {
+                    btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+                    handleVideoEnded()
+                }
+                VlcMediaPlayer.Event.EncounteredError -> ui.post {
+                    // Verificamos que el fragmento siga vivo y tenga contexto
+                    if (isAdded) {
+                        context?.let { safeContext ->
+                            val now = System.currentTimeMillis()
+                            if (now - errorRetryTimestamp > MIN_RETRY_INTERVAL_MS) {
+                                errorRetryTimestamp = now
+
+                                // Usamos safeContext en lugar de requireContext()
+                                Toast.makeText(
+                                    safeContext,
+                                    "Error de video: Chequee sus credenciales o si el servidor funciona.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+
+                                Log.e(TAG, "⚠️ VLC Error silencioso. Reiniciando player...")
+
+                                VideoPlayerHolder.release()
+                                currentMovie?.videoUrl?.let { initVlc(it) }
+                            }
+                        }
+                    } else {
+                        Log.w(TAG, "⚠️ Error de VLC recibido pero el fragmento ya no está activo.")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun formatMs(ms: Long): String {
+        val t = (ms/1000).toInt().coerceAtLeast(0)
+        val h = t/3600; val m = (t/60)%60; val s = t%60
+        return if(h>0) "%d:%02d:%02d".format(h,m,s) else "%d:%02d".format(m,s)
+    }
+
+    private fun startTicker() {
+        stopTicker()
+        val r = object : Runnable {
+            override fun run() {
+                val p = VideoPlayerHolder.mediaPlayer
+                if (p != null) {
+                    val dur = p.length
+                    val pos = if (isUserSeeking) (previewSeekMs ?: p.time) else p.time
+                    txtPos.text = formatMs(pos); txtDur.text = if(dur>0) formatMs(dur) else "0:00"
+                    if (dur > 0 && !isUserSeeking && root.findFocus() !== seekBar) {
+                        seekBar.progress = ((pos.toDouble()/dur.toDouble())*1000.0).toInt().coerceIn(0,1000)
+                    }
+                    val now = System.currentTimeMillis()
+                    val d = (currentMovie?.delaySkip?:0)*1000L; val s = (currentMovie?.skipToSecond?:0)
+                    val showSkip = (now >= skipHideUntilMs) && (s > 0) && (pos in d..(d+SKIP_WINDOW_MS))
+                    skipIntroButton.visibility = if (showSkip) View.VISIBLE else View.GONE
+                }
+                ui.postDelayed(this, 300)
+            }
+        }
+        ticker = r; ui.post(r)
+    }
+
+    private fun stopTicker() { ticker?.let { ui.removeCallbacks(it) }; ticker = null }
+
+    private fun toggleControls() { if (controlsVisible) hideOverlayOnly() else showOverlayAndFocusPlay() }
+
+    private fun showOverlayAndFocusPlay() {
+        controlsVisible = true
+        controlsOverlay.visibility = View.VISIBLE; controlsOverlay.alpha = 1f
+        controlsOverlay.bringToFront()
+        if (isTvDevice()) btnPlayPause.requestFocus()
+        scheduleAutoHide()
+    }
+
+    private fun hideOverlayOnly() { ui.removeCallbacks(hideControlsRunnable); hideControlsRunnable.run() }
+    private fun scheduleAutoHide() { ui.removeCallbacks(hideControlsRunnable); ui.postDelayed(hideControlsRunnable, AUTO_HIDE_MS) }
+    private fun bumpControlsTimeout() { if (controlsVisible) scheduleAutoHide() }
+
+    private fun performSkipIntro() {
+        val target = ((currentMovie?.delaySkip?:0) + (currentMovie?.skipToSecond?:0)) * 1000L
+        if (target <= 0) return
+        VideoPlayerHolder.mediaPlayer?.time = target
+        skipHideUntilMs = System.currentTimeMillis() + 2000L
+        skipIntroButton.visibility = View.GONE
+        VideoPlayerHolder.mediaPlayer?.play()
+        btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+        if (isTvDevice()) root.requestFocus()
+    }
+
+    private fun togglePlayPause() {
+        val p = VideoPlayerHolder.mediaPlayer ?: return
+        if (p.isPlaying) { p.pause(); btnPlayPause.setImageResource(android.R.drawable.ic_media_play) }
+        else { p.play(); btnPlayPause.setImageResource(android.R.drawable.ic_media_pause) }
+    }
+
+    private fun seekByMs(delta: Long) {
+        val p = VideoPlayerHolder.mediaPlayer ?: return
+        val dur = p.length
+        if (dur <= 0) return
+        val target = p.time + delta
+        if (target >= dur - END_EPSILON_MS) {
+            p.time = dur
+            handleVideoEnded()
+            return
+        }
+        p.time = target.coerceIn(0L, dur)
+    }
+
+    private fun seekBarStep(dir: Int) {
+        val p = VideoPlayerHolder.mediaPlayer ?: return
+        val dur = p.length
+        if (dur <= 0) return
+
+        val stepSize = 40
+        val newProg = (seekBar.progress + dir * stepSize).coerceIn(0, 1000)
+        val target = (dur * (newProg / 1000.0)).toLong()
+
+        if (target >= dur - END_EPSILON_MS) {
+            seekBar.progress = 1000
+            txtPos.text = formatMs(dur)
+            previewSeekMs = dur
+            isUserSeeking = false
+            p.time = dur
+            handleVideoEnded()
+            return
+        }
+
+        seekBar.progress = newProg
+        txtPos.text = formatMs(target)
+        previewSeekMs = target
+        isUserSeeking = true
+
+        val now = System.currentTimeMillis()
+        if (now - lastSeekTime > SEEK_THROTTLE_MS) {
+            lastSeekTime = now
+            p.time = target
+            if (!p.isPlaying) {
+                p.play()
+                ui.postDelayed({ if (isUserSeeking) p.pause() }, 20)
+            }
+        }
+        ui.removeCallbacks(clearPreviewRunnable)
+        ui.postDelayed(clearPreviewRunnable, 1200)
+    }
+}

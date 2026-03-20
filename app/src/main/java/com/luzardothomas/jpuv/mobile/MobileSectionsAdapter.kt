@@ -1,0 +1,161 @@
+package com.luzardothomas.jpuv.mobile
+
+import android.text.TextUtils
+import android.view.Gravity
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.view.ViewOutlineProvider
+import android.widget.ImageView
+import android.widget.TextView
+import androidx.core.view.updateLayoutParams
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.bumptech.glide.Glide
+import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
+import com.luzardothomas.jpuv.R
+import com.luzardothomas.jpuv.utils.Movie
+
+/**
+ *  Adapter por secciones para el RecyclerView de Mobile
+ */
+class MobileSectionsAdapter(
+    private val sections: List<MobileSection>,
+    private val onMovieClick: (Movie) -> Unit
+) : RecyclerView.Adapter<MobileSectionsAdapter.SectionVH>() {
+
+    private var selectedVideoUrl: String? = null
+
+    // =========================
+    // Recycler
+    // =========================
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): SectionVH {
+        val v = LayoutInflater.from(parent.context)
+            .inflate(R.layout.item_mobile_section, parent, false)
+        return SectionVH(v)
+    }
+
+    override fun getItemCount(): Int = sections.size
+
+    override fun onBindViewHolder(holder: SectionVH, position: Int) {
+        holder.bind(sections[position])
+    }
+
+    // =========================
+    // ViewHolder sección
+    // =========================
+    inner class SectionVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+
+        private val title = itemView.findViewById<TextView>(R.id.sectionTitle)
+        private val rowRecycler = itemView.findViewById<RecyclerView>(R.id.sectionRowRecycler)
+
+        fun bind(section: MobileSection) {
+            title.text = section.title
+
+            rowRecycler.layoutManager =
+                LinearLayoutManager(itemView.context, RecyclerView.HORIZONTAL, false)
+
+            // El adapter interno usa selectedVideoUrl del adapter externo (closure)
+            rowRecycler.adapter = MoviesAdapter(section.items)
+        }
+    }
+
+    // =========================
+    // Adapter horizontal (cartas)
+    // =========================
+    inner class MoviesAdapter(
+        private val items: List<Movie>
+    ) : RecyclerView.Adapter<MoviesAdapter.MovieVH>() {
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): MovieVH {
+            val v = LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_mobile_card, parent, false)
+            return MovieVH(v)
+        }
+
+        override fun getItemCount(): Int = items.size
+
+        override fun onBindViewHolder(holder: MovieVH, position: Int) {
+            holder.bind(items[position])
+        }
+
+        inner class MovieVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+
+            private val cardRoot = itemView.findViewById<View>(R.id.cardRoot)
+            private val title = itemView.findViewById<TextView>(R.id.cardTitle)
+            private val cover = itemView.findViewById<ImageView>(R.id.cardCover)
+
+            private fun isAction(movie: Movie): Boolean =
+                movie.videoUrl?.startsWith("__action_") == true
+
+            fun bind(movie: Movie) {
+                title.text = movie.title
+
+                val urlKey = movie.videoUrl ?: ""
+                val action = isAction(movie)
+                val isSelected = (urlKey.isNotEmpty() && urlKey == selectedVideoUrl)
+
+                // ROOT: fondo + outline SIEMPRE
+                cardRoot.background =
+                    cardRoot.context.getDrawable(R.drawable.bg_action_card)
+                cardRoot.clipToOutline = true
+                cardRoot.outlineProvider = ViewOutlineProvider.BACKGROUND
+
+                // COVER: fondo + outline + scale SIEMPRE
+                cover.background =
+                    cover.context.getDrawable(R.drawable.bg_action_card)
+                cover.clipToOutline = true
+                cover.outlineProvider = ViewOutlineProvider.BACKGROUND
+                cover.scaleType = ImageView.ScaleType.FIT_CENTER
+
+                // TITLE: estado NORMAL por defecto
+                title.apply {
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
+                    gravity = Gravity.CENTER
+                    textAlignment = View.TEXT_ALIGNMENT_CENTER
+                    includeFontPadding = false
+                }
+                title.updateLayoutParams<ViewGroup.LayoutParams> {
+                    height = ViewGroup.LayoutParams.WRAP_CONTENT
+                }
+
+                // LIMPIAR GLIDE SIEMPRE
+                Glide.with(cover).clear(cover)
+                cover.setImageDrawable(null)
+
+                if (action) {
+                    // ACCIONES: sin cover, texto ocupa toda la card
+                    cover.visibility = View.GONE
+
+                    title.updateLayoutParams<ViewGroup.LayoutParams> {
+                        height = ViewGroup.LayoutParams.MATCH_PARENT
+                    }
+
+                } else {
+                    cover.visibility = View.VISIBLE
+
+                    val url = movie.cardImageUrl?.trim().orEmpty()
+                    if (url.isNotEmpty()) {
+                        Glide.with(cover)
+                            .load(url)
+                            .fitCenter()
+                            .transition(DrawableTransitionOptions.withCrossFade())
+                            .into(cover)
+                    }
+                }
+
+                // =========================================================
+                // Highlight último reproducido / clickeado
+                // =========================================================
+                cardRoot.alpha = if (isSelected) 1f else 0.90f
+                cardRoot.scaleX = if (isSelected) 1.04f else 1f
+                cardRoot.scaleY = if (isSelected) 1.04f else 1f
+                cardRoot.isSelected = isSelected
+                itemView.setOnClickListener { onMovieClick(movie) }
+            }
+
+
+        }
+    }
+}

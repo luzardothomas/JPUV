@@ -1,20 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical">
+    android:orientation="vertical"
+    android:background="@color/default_background">
 
-    <!-- Barra superior -->
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="12dp"
+        android:padding="8dp"
         android:orientation="horizontal"
         android:gravity="center_vertical">
 
-        <!-- ✅ BACK (arriba-izquierda) -->
         <ImageButton
             android:id="@+id/btnBack"
             android:layout_width="40dp"
@@ -22,51 +22,68 @@
             android:src="@android:drawable/ic_media_previous"
             android:contentDescription="Volver"
             android:background="@android:color/transparent"
-            android:clickable="true"
-            android:focusable="true"
-            android:visibility="gone"
-            android:alpha="0" />
+            android:visibility="gone" />
 
-        <TextView
-            android:id="@+id/titleText"
+        <ImageView
+            android:id="@+id/logoImage"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:src="@drawable/logo_with_name"
+            android:adjustViewBounds="true"
+            android:scaleType="fitStart"
+            android:layout_marginStart="8dp" />
+
+        <View
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="WatchOffline"
-            android:textSize="18sp"
-            android:textStyle="bold" />
+            android:layout_height="0dp"
+            android:layout_weight="1" />
 
-        <!-- Lupa / Cerrar -->
+        <Switch
+            android:id="@+id/switchApi"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="API"
+            android:textColor="@android:color/white"
+            android:textSize="14sp"
+            android:paddingEnd="12dp"
+            android:thumbTint="@color/selected_background"
+            android:trackTint="#80FFFFFF" />
+
         <ImageButton
             android:id="@+id/btnToggleSearch"
             android:layout_width="40dp"
             android:layout_height="40dp"
             android:src="@android:drawable/ic_menu_search"
             android:contentDescription="Buscar"
-            android:background="@android:color/transparent"
-            android:clickable="true"
-            android:focusable="true" />
+            android:background="@android:color/transparent" />
     </LinearLayout>
 
-    <!-- Barra de búsqueda inline (arranca oculta) -->
     <EditText
         android:id="@+id/searchInput"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:visibility="gone"
-        android:layout_marginStart="12dp"
-        android:layout_marginEnd="12dp"
+        android:layout_marginHorizontal="12dp"
         android:layout_marginBottom="8dp"
-        android:hint="Buscar (JSON o título)…"
+        android:hint="Buscar..."
         android:singleLine="true"
         android:imeOptions="actionSearch"
-        android:inputType="text" />
+        android:inputType="text"
+        android:textColor="@android:color/white"
+        android:textColorHint="#80FFFFFF" />
 
-    <!-- Lista -->
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/sectionsRecycler"
+    <androidx.coordinatorlayout.widget.CoordinatorLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1" />
+        android:layout_weight="1">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/sectionsRecycler"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingBottom="16dp" />
+
+    </androidx.coordinatorlayout.widget.CoordinatorLayout>
 
 </LinearLayout>

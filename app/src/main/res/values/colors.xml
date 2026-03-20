@@ -1,9 +1,10 @@
 <resources>
     <color name="background_gradient_start">#000000</color>
     <color name="background_gradient_end">#DDDDDD</color>
-    <color name="fastlane_background">#0096a6</color>
-    <color name="search_opaque">#ffaa3f</color>
-    <color name="selected_background">#3F51B5</color>
+    <color name="fastlane_background">#A32877</color>
+    <color name="search_opaque">#90CCB1</color>
+    <color name="selected_background">#241F4C</color>
     <color name="default_background">#2C2A2A</color>
     <color name="background_dark">#2C2A2A</color>
+    <color name="jpuv_title_color">#A32877</color>
 </resources>

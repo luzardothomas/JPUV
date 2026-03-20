@@ -1,6 +1,6 @@
 <resources>
-    <string name="app_name">WatchOffline</string>
-    <string name="browse_title">WatchOffline</string>
+    <string name="app_name">JPUV</string>
+    <string name="browse_title">JPUV</string>
     <string name="related_movies">Related Videos</string>
     <string name="erase_json">Borrar JSON</string>
     <string name="watch_trailer_1">Mirar video</string>

@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.WatchOffline.Television" parent="Theme.Leanback">
+    <style name="Theme.JPUV.Television" parent="Theme.Leanback">
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>
 

@@ -19,6 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "WatchOffline"
+rootProject.name = "JPUV"
 include(":app")
  

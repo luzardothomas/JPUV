@@ -1,12 +1,26 @@
 <resources>
     <style name="Theme.MyApp" parent="Theme.Leanback">
         <item name="android:windowFullscreen">true</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowBackground">@color/default_background</item>
+        <item name="android:colorBackground">@color/default_background</item>
+
+        <item name="android:windowSplashScreenAnimatedIcon" targetApi="s">@android:color/transparent</item>
+        <item name="android:windowSplashScreenBackground" targetApi="s">@color/default_background</item>
     </style>
-    <style name="Theme.WatchOffline" parent="@style/Theme.Leanback" />
-    <style name="Theme.WatchOffline.Mobile" parent="Theme.AppCompat.NoActionBar">
+
+    <style name="Theme.JPUV" parent="Theme.MyApp" />
+
+    <style name="Theme.JPUV.Mobile" parent="Theme.AppCompat.NoActionBar">
         <item name="colorPrimary">@color/selected_background</item>
+        <item name="android:windowBackground">@color/default_background</item>
+        <item name="android:windowIsTranslucent">false</item>
     </style>
-    <style name="Theme.WatchOffline.Television" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="colorPrimary">@color/default_background</item>
+
+    <style name="Theme.JPUV.Television" parent="Theme.MyApp" />
+
+    <style name="Theme.JPUV.AppCompat" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">@color/default_background</item>
     </style>
 </resources>

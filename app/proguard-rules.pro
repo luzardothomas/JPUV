@@ -25,13 +25,13 @@
 -keepattributes *Annotation*
 
 # Mantener clases internas de importers (ApiCover) y sus fields
--keep class com.example.watchoffline.AutoImporter$ApiCover { *; }
--keep class com.example.watchoffline.LocalAutoImporter$ApiCover { *; }
+-keep class com.luzardothomas.jpuv.AutoImporter$ApiCover { *; }
+-keep class com.luzardothomas.jpuv.LocalAutoImporter$ApiCover { *; }
 
 # Mantener modelos persistidos en JSON (SharedPreferences)
--keep class com.example.watchoffline.VideoItem { *; }
--keep class com.example.watchoffline.ImportedJson { *; }
--keep class com.example.watchoffline.JsonDataManager { *; }
+-keep class com.luzardothomas.jpuv.VideoItem { *; }
+-keep class com.luzardothomas.jpuv.ImportedJson { *; }
+-keep class com.luzardothomas.jpuv.JsonDataManager { *; }
 
 # Desactivar LOGS
 

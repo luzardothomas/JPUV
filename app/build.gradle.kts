@@ -3,17 +3,15 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
-
-
 android {
-    namespace = "com.example.watchoffline"
+    namespace = "com.luzardothomas.jpuv"
     compileSdk = 35
     viewBinding {
         enable = true
     }
 
     defaultConfig {
-        applicationId = "com.example.watchoffline"
+        applicationId = "com.luzardothomas.jpuv"
         minSdk = 21
         targetSdk = 35
         versionCode = 1
@@ -21,10 +19,10 @@ android {
 
     }
 
-    packagingOptions {
+    packaging {
         resources {
-            excludes += "META-INF/INDEX.LIST"
-            excludes += "META-INF/io.netty.versions.properties"
+            excludes += "/META-INF/INDEX.LIST"
+            excludes += "/META-INF/io.netty.versions.properties"
         }
     }
 
